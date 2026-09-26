@@ -30,7 +30,16 @@ const page = ref(1)
 const total = ref(0)
 const installing = ref('')
 const notice = ref('')
-const installed = ref<Set<string>>(new Set())
+const installedNames = ref<Set<string>>(new Set())
+const installedRepos = ref<Set<string>>(new Set())
+
+function normalizeRepo(value: string) {
+  return String(value || '')
+    .replace(/^https?:\/\/github\.com\//i, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase()
+}
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PER_PAGE)))
 const canPrev = computed(() => page.value > 1)
@@ -76,10 +85,16 @@ async function markInstalled() {
     const res = await fetch('/api/plugins/installed')
     if (!res.ok) return
     const data = await res.json()
-    const set = new Set<string>(Array.isArray(data?.packages) ? data.packages : [])
-    installed.value = set
+    const names = new Set<string>(Array.isArray(data?.packages) ? data.packages : [])
+    const repos = new Set<string>()
+    for (const entry of Array.isArray(data?.installed) ? data.installed : []) {
+      if (entry?.name) names.add(entry.name)
+      if (entry?.repository) repos.add(normalizeRepo(entry.repository))
+    }
+    installedNames.value = names
+    installedRepos.value = repos
     for (const item of plugins.value) {
-      if (set.has(installTarget(item))) item.installed = true
+      if (names.has(installTarget(item)) || repos.has(normalizeRepo(item.url))) item.installed = true
     }
   } catch { /* older Core without the endpoint */ }
 }
