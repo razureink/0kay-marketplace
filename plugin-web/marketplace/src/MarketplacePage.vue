@@ -13,14 +13,35 @@ interface MarketPlugin {
   topics: string[]
   manifest?: { name?: string; version?: string; description?: string }
   loadingManifest?: boolean
+  installing?: boolean
+  installed?: boolean
+  error?: string
 }
 
 const TOPIC = '0kay-plugin'
+const PER_PAGE = 12
+const MAX_RESULTS = 1000
 const plugins = ref<MarketPlugin[]>([])
 const loading = ref(false)
 const error = ref('')
 const query = ref('')
 const copied = ref('')
+const page = ref(1)
+const total = ref(0)
+const installing = ref('')
+const notice = ref('')
+
+const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PER_PAGE)))
+const canPrev = computed(() => page.value > 1)
+const canNext = computed(() => page.value < totalPages.value)
+
+function installTarget(item: MarketPlugin) {
+  return item.manifest?.name || item.full_name
+}
+
+function installCommand(item: MarketPlugin) {
+  return `0kay-pm install ${installTarget(item)}`
+}
 
 async function fetchManifest(full: string, branch: string) {
   try {
@@ -49,17 +70,22 @@ async function enrich() {
   await Promise.all(workers)
 }
 
-async function load() {
+async function load(targetPage = 1) {
   loading.value = true
   error.value = ''
   copied.value = ''
+  notice.value = ''
+  const q = query.value.trim()
+  const search = `topic:${TOPIC}` + (q ? ` ${q}` : '')
   try {
     const res = await fetch(
-      `https://api.github.com/search/repositories?q=topic:${TOPIC}&sort=stars&order=desc&per_page=100`,
+      `https://api.github.com/search/repositories?q=${encodeURIComponent(search)}&sort=stars&order=desc&per_page=${PER_PAGE}&page=${targetPage}`,
       { headers: { Accept: 'application/vnd.github+json' } },
     )
     if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`)
     const data = await res.json()
+    total.value = Math.min(data.total_count || 0, MAX_RESULTS)
+    page.value = targetPage
     plugins.value = (data.items || []).map((repo: any) => ({
       full_name: repo.full_name,
       name: repo.name,
@@ -79,10 +105,9 @@ async function load() {
   }
 }
 
-onMounted(load)
-
-function installCommand(item: MarketPlugin) {
-  return item.manifest?.name ? `0kay-pm install ${item.manifest.name}` : `0kay-pm install ${item.full_name}`
+function goto(target: number) {
+  if (loading.value || target < 1 || target > totalPages.value) return
+  load(target)
 }
 
 async function copyCommand(item: MarketPlugin) {
@@ -93,15 +118,53 @@ async function copyCommand(item: MarketPlugin) {
   } catch { /* clipboard unavailable */ }
 }
 
-const filtered = computed(() => {
-  const q = query.value.trim().toLowerCase()
-  if (!q) return plugins.value
-  return plugins.value.filter((item) =>
-    `${item.full_name} ${item.description} ${item.manifest?.name || ''} ${item.manifest?.version || ''}`
-      .toLowerCase()
-      .includes(q),
-  )
-})
+async function waitForInstall(item: MarketPlugin) {
+  for (let i = 0; i < 400; i++) {
+    await new Promise((r) => setTimeout(r, 1500))
+    const res = await fetch('/api/plugins/install/status')
+    if (!res.ok) continue
+    const state = await res.json()
+    if (state.status === 'done') {
+      item.installed = true
+      notice.value = `已安装 ${installTarget(item)}，正在刷新…`
+      await fetch('/api/ui/patches', { method: 'POST' })
+      setTimeout(() => location.reload(), 1200)
+      return
+    }
+    if (state.status === 'failed') throw new Error(state.error || '安装失败')
+  }
+  throw new Error('安装超时')
+}
+
+async function installPlugin(item: MarketPlugin) {
+  if (installing.value || item.installed) return
+  notice.value = ''
+  item.error = ''
+  item.installing = true
+  installing.value = item.full_name
+  try {
+    const res = await fetch('/api/plugins/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ package: installTarget(item) }),
+    })
+    if (res.status === 404) {
+      await copyCommand(item)
+      notice.value = '当前 Core 不支持一键安装，已复制安装命令'
+      return
+    }
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+    await waitForInstall(item)
+  } catch (e: any) {
+    item.error = e?.message || String(e)
+  } finally {
+    item.installing = false
+    installing.value = ''
+  }
+}
+
+onMounted(() => load(1))
 </script>
 
 <template>
@@ -110,21 +173,30 @@ const filtered = computed(() => {
       <div>
         <p class="mp-eyebrow">0KAY MARKETPLACE</p>
         <h1>插件市场</h1>
-        <p class="mp-sub">来自 GitHub topic <code>{{ TOPIC }}</code> 的 0KAY 插件。</p>
+        <p class="mp-sub">来自 GitHub topic <code>{{ TOPIC }}</code> 的 0KAY 插件，可直接一键安装。</p>
       </div>
       <div class="mp-actions">
-        <input v-model="query" class="mp-search" type="search" placeholder="搜索插件…" aria-label="搜索插件" />
-        <button class="mp-btn" :disabled="loading" @click="load">{{ loading ? '加载中…' : '刷新' }}</button>
+        <input
+          v-model="query"
+          class="mp-search"
+          type="search"
+          placeholder="搜索插件…"
+          aria-label="搜索插件"
+          @keyup.enter="load(1)"
+        />
+        <button class="mp-btn" :disabled="loading" @click="load(1)">{{ loading ? '加载中…' : '搜索' }}</button>
+        <button class="mp-btn tonal" :disabled="loading" @click="load(page)">刷新</button>
       </div>
     </header>
 
     <p v-if="error" class="mp-alert">{{ error }}</p>
+    <p v-if="notice" class="mp-notice">{{ notice }}</p>
 
     <div v-if="loading && !plugins.length" class="mp-empty">正在从 GitHub 拉取插件…</div>
-    <div v-else-if="!filtered.length" class="mp-empty">{{ query ? '没有匹配的插件' : '暂无插件' }}</div>
+    <div v-else-if="!plugins.length" class="mp-empty">{{ query ? '没有匹配的插件' : '暂无插件' }}</div>
 
     <ul v-else class="mp-grid">
-      <li v-for="item in filtered" :key="item.full_name" class="mp-card">
+      <li v-for="item in plugins" :key="item.full_name" class="mp-card">
         <div class="mp-head">
           <img v-if="item.avatar" class="mp-avatar" :src="item.avatar" :alt="item.owner" loading="lazy" />
           <div class="mp-title">
@@ -141,15 +213,29 @@ const filtered = computed(() => {
           <span v-if="item.topics.length > 6" class="mp-chip muted">+{{ item.topics.length - 6 }}</span>
         </div>
 
+        <p v-if="item.error" class="mp-err">{{ item.error }}</p>
+
         <div class="mp-foot">
-          <code class="mp-cmd" :title="installCommand(item)">{{ installCommand(item) }}</code>
-          <button class="mp-btn small" @click="copyCommand(item)">{{ copied === item.full_name ? '已复制' : '复制' }}</button>
+          <button
+            v-if="!item.installed"
+            class="mp-btn small install"
+            :disabled="!!installing"
+            @click="installPlugin(item)"
+          >{{ item.installing ? '安装中…' : '安装' }}</button>
+          <span v-else class="mp-installed">已安装</span>
+          <button class="mp-btn small tonal" @click="copyCommand(item)">{{ copied === item.full_name ? '已复制' : '复制命令' }}</button>
           <a class="mp-btn small tonal" :href="item.url" target="_blank" rel="noopener noreferrer">打开</a>
         </div>
       </li>
     </ul>
 
-    <p class="mp-note">未登录的 GitHub 搜索接口每小时约 60 次；安装命令需在本机用 <code>0kay-pm</code> 执行。</p>
+    <nav v-if="plugins.length && !error" class="mp-pager">
+      <button class="mp-btn small tonal" :disabled="!canPrev || loading" @click="goto(page - 1)">上一页</button>
+      <span class="mp-count">第 {{ page }} / {{ totalPages }} 页 · 共 {{ total }} 个插件</span>
+      <button class="mp-btn small tonal" :disabled="!canNext || loading" @click="goto(page + 1)">下一页</button>
+    </nav>
+
+    <p class="mp-note">一键安装会调用本机 Core 的 <code>/api/plugins/install</code>，由 <code>0kay-pm</code> 完成下载与构建；未登录的 GitHub 搜索接口每小时约 60 次。</p>
   </div>
 </template>
 
@@ -166,9 +252,14 @@ const filtered = computed(() => {
 .mp-btn { min-height: 44px; padding: 0 20px; border: 0; border-radius: 999px; background: var(--md-primary); color: var(--md-on-primary); font: 700 14px/1 inherit; cursor: pointer; transition: transform .2s var(--ease-spring, ease), filter .15s; }
 .mp-btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
 .mp-btn:disabled { opacity: .55; cursor: default; }
+.mp-btn.tonal { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
 .mp-btn.small { min-height: 34px; padding: 0 14px; font-size: 13px; }
 .mp-btn.small.tonal { background: var(--md-secondary-container); color: var(--md-on-secondary-container); display: inline-flex; align-items: center; text-decoration: none; }
+.mp-btn.small.install { background: var(--md-primary); color: var(--md-on-primary); }
+.mp-installed { font-size: 13px; font-weight: 750; color: var(--md-primary); }
 .mp-alert { padding: 12px 16px; border-radius: 16px; background: var(--md-error-container); color: #410e0b; font-size: 13px; }
+.mp-notice { padding: 12px 16px; border-radius: 16px; background: var(--md-secondary-container); color: var(--md-on-secondary-container); font-size: 13px; }
+.mp-err { margin: 0; font-size: 12px; color: #b3261e; }
 .mp-empty { padding: 40px; text-align: center; color: var(--md-on-surface-variant); background: var(--md-surface-container-low); border-radius: 20px; }
 .mp-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; }
 .mp-card { display: flex; flex-direction: column; gap: 12px; padding: 18px; border: 1px solid var(--md-outline-variant); border-radius: 24px 24px 24px 8px; background: var(--md-surface-container-low); transition: transform .24s var(--ease-spring, ease), box-shadow .24s, border-color .24s; }
@@ -185,6 +276,7 @@ const filtered = computed(() => {
 .mp-chip { font-size: 11.5px; font-weight: 700; padding: 3px 10px; border-radius: 999px; background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
 .mp-chip.muted { background: var(--md-surface-container-high); color: var(--md-on-surface-variant); }
 .mp-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.mp-cmd { flex: 1; min-width: 0; font-family: var(--code-font); font-size: 12px; background: var(--md-surface-container-highest); padding: 8px 12px; border-radius: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 26px; flex-wrap: wrap; }
+.mp-count { color: var(--md-on-surface-variant); font-size: 13px; }
 .mp-note { margin: 26px 0 0; color: var(--md-on-surface-variant); font-size: 12.5px; }
 </style>
