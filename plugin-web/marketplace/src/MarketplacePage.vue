@@ -30,6 +30,7 @@ const page = ref(1)
 const total = ref(0)
 const installing = ref('')
 const notice = ref('')
+const installed = ref<Set<string>>(new Set())
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PER_PAGE)))
 const canPrev = computed(() => page.value > 1)
@@ -70,6 +71,19 @@ async function enrich() {
   await Promise.all(workers)
 }
 
+async function markInstalled() {
+  try {
+    const res = await fetch('/api/plugins/installed')
+    if (!res.ok) return
+    const data = await res.json()
+    const set = new Set<string>(Array.isArray(data?.packages) ? data.packages : [])
+    installed.value = set
+    for (const item of plugins.value) {
+      if (set.has(installTarget(item))) item.installed = true
+    }
+  } catch { /* older Core without the endpoint */ }
+}
+
 async function load(targetPage = 1) {
   loading.value = true
   error.value = ''
@@ -98,6 +112,7 @@ async function load(targetPage = 1) {
       topics: repo.topics || [],
     }))
     await enrich()
+    await markInstalled()
   } catch (e: any) {
     error.value = e?.message || String(e)
   } finally {
