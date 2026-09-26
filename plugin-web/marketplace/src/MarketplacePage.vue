@@ -15,7 +15,16 @@ interface MarketPlugin {
   loadingManifest?: boolean
   installing?: boolean
   installed?: boolean
+  removable?: boolean
+  /** Package name as recorded by 0kay-pm (used to uninstall). */
+  entryName?: string
   error?: string
+}
+
+interface InstalledEntry {
+  name: string
+  source?: string
+  repository?: string
 }
 
 const TOPIC = '0kay-plugin'
@@ -30,8 +39,8 @@ const page = ref(1)
 const total = ref(0)
 const installing = ref('')
 const notice = ref('')
-const installedNames = ref<Set<string>>(new Set())
-const installedRepos = ref<Set<string>>(new Set())
+const installedByName = ref<Map<string, InstalledEntry>>(new Map())
+const installedByRepo = ref<Map<string, InstalledEntry>>(new Map())
 
 function normalizeRepo(value: string) {
   return String(value || '')
@@ -45,12 +54,13 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PER_PAGE))
 const canPrev = computed(() => page.value > 1)
 const canNext = computed(() => page.value < totalPages.value)
 
+/** Best-effort identity of a card for matching against installed packages. */
 function installTarget(item: MarketPlugin) {
   return item.manifest?.name || item.full_name
 }
 
 function installCommand(item: MarketPlugin) {
-  return `0kay-pm install ${installTarget(item)}`
+  return `0kay-pm install ${item.full_name}`
 }
 
 async function fetchManifest(full: string, branch: string) {
@@ -85,16 +95,26 @@ async function markInstalled() {
     const res = await fetch('/api/plugins/installed')
     if (!res.ok) return
     const data = await res.json()
-    const names = new Set<string>(Array.isArray(data?.packages) ? data.packages : [])
-    const repos = new Set<string>()
+    const byName = new Map<string, InstalledEntry>()
+    const byRepo = new Map<string, InstalledEntry>()
     for (const entry of Array.isArray(data?.installed) ? data.installed : []) {
-      if (entry?.name) names.add(entry.name)
-      if (entry?.repository) repos.add(normalizeRepo(entry.repository))
+      if (!entry?.name) continue
+      byName.set(entry.name, entry)
+      if (entry.repository) byRepo.set(normalizeRepo(entry.repository), entry)
     }
-    installedNames.value = names
-    installedRepos.value = repos
+    // Older Core returns only names.
+    for (const name of Array.isArray(data?.packages) ? data.packages : []) {
+      if (!byName.has(name)) byName.set(name, { name })
+    }
+    installedByName.value = byName
+    installedByRepo.value = byRepo
     for (const item of plugins.value) {
-      if (names.has(installTarget(item)) || repos.has(normalizeRepo(item.url))) item.installed = true
+      const entry = byName.get(installTarget(item)) || byRepo.get(normalizeRepo(item.url))
+      if (!entry) continue
+      item.installed = true
+      item.entryName = entry.name
+      // Only plugins installed by 0kay-pm can be uninstalled.
+      item.removable = entry.source === 'pm'
     }
   } catch { /* older Core without the endpoint */ }
 }
@@ -148,50 +168,70 @@ async function copyCommand(item: MarketPlugin) {
   } catch { /* clipboard unavailable */ }
 }
 
-async function waitForInstall(item: MarketPlugin) {
+async function waitForOp(onDone: () => void) {
   for (let i = 0; i < 400; i++) {
     await new Promise((r) => setTimeout(r, 1500))
     const res = await fetch('/api/plugins/install/status')
     if (!res.ok) continue
     const state = await res.json()
     if (state.status === 'done') {
-      item.installed = true
-      notice.value = `已安装 ${installTarget(item)}，正在刷新…`
+      onDone()
       await fetch('/api/ui/patches', { method: 'POST' })
       setTimeout(() => location.reload(), 1200)
       return
     }
-    if (state.status === 'failed') throw new Error(state.error || '安装失败')
+    if (state.status === 'failed') throw new Error(state.error || '操作失败')
   }
-  throw new Error('安装超时')
+  throw new Error('操作超时')
 }
 
-async function installPlugin(item: MarketPlugin) {
-  if (installing.value || item.installed) return
-  notice.value = ''
+async function sendOp(endpoint: string, item: MarketPlugin, pkg: string, onDone: () => void) {
   item.error = ''
   item.installing = true
   installing.value = item.full_name
   try {
-    const res = await fetch('/api/plugins/install', {
+    const res = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ package: installTarget(item) }),
+      body: JSON.stringify({ package: pkg }),
     })
     if (res.status === 404) {
-      await copyCommand(item)
-      notice.value = '当前 Core 不支持一键安装，已复制安装命令'
+      notice.value = '当前 Core 不支持该操作'
       return
     }
     const data = await res.json().catch(() => ({}))
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
-    await waitForInstall(item)
+    await waitForOp(onDone)
   } catch (e: any) {
     item.error = e?.message || String(e)
   } finally {
     item.installing = false
     installing.value = ''
   }
+}
+
+function installPlugin(item: MarketPlugin) {
+  if (installing.value || item.installed) return
+  notice.value = ''
+  // owner/repo installs regardless of the manifest's scope.
+  return sendOp('/api/plugins/install', item, item.full_name, () => {
+    item.installed = true
+    item.entryName = item.manifest?.name || item.full_name
+    notice.value = `已安装 ${item.full_name}，正在刷新…`
+  })
+}
+
+function uninstallPlugin(item: MarketPlugin) {
+  if (installing.value || !item.installed) return
+  const pkg = item.entryName || item.full_name
+  if (!window.confirm(`确定卸载 ${pkg}？`)) return
+  notice.value = ''
+  return sendOp('/api/plugins/uninstall', item, pkg, () => {
+    item.installed = false
+    item.removable = false
+    item.entryName = undefined
+    notice.value = `已卸载 ${pkg}，正在刷新…`
+  })
 }
 
 onMounted(() => load(1))
@@ -252,6 +292,12 @@ onMounted(() => load(1))
             :disabled="!!installing"
             @click="installPlugin(item)"
           >{{ item.installing ? '安装中…' : '安装' }}</button>
+          <button
+            v-else-if="item.removable"
+            class="mp-btn small danger"
+            :disabled="!!installing"
+            @click="uninstallPlugin(item)"
+          >{{ item.installing ? '卸载中…' : '卸载' }}</button>
           <span v-else class="mp-installed">已安装</span>
           <button class="mp-btn small tonal" @click="copyCommand(item)">{{ copied === item.full_name ? '已复制' : '复制命令' }}</button>
           <a class="mp-btn small tonal" :href="item.url" target="_blank" rel="noopener noreferrer">打开</a>
@@ -286,6 +332,7 @@ onMounted(() => load(1))
 .mp-btn.small { min-height: 34px; padding: 0 14px; font-size: 13px; }
 .mp-btn.small.tonal { background: var(--md-secondary-container); color: var(--md-on-secondary-container); display: inline-flex; align-items: center; text-decoration: none; }
 .mp-btn.small.install { background: var(--md-primary); color: var(--md-on-primary); }
+.mp-btn.small.danger { background: var(--md-error-container); color: #410e0b; }
 .mp-installed { font-size: 13px; font-weight: 750; color: var(--md-primary); }
 .mp-alert { padding: 12px 16px; border-radius: 16px; background: var(--md-error-container); color: #410e0b; font-size: 13px; }
 .mp-notice { padding: 12px 16px; border-radius: 16px; background: var(--md-secondary-container); color: var(--md-on-secondary-container); font-size: 13px; }
