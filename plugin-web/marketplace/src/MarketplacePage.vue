@@ -79,6 +79,8 @@ async function load() {
   }
 }
 
+onMounted(load)
+
 function installCommand(item: MarketPlugin) {
   return item.manifest?.name ? `0kay-pm install ${item.manifest.name}` : `0kay-pm install ${item.full_name}`
 }
