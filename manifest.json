@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "@razureink/0kay-marketplace",
+  "version": "0.1.0",
+  "description": "0KAY plugin marketplace: browse and install plugins tagged with the 0kay-plugin GitHub topic.",
+  "requires": ["core"],
+  "install": [["npm", "--prefix", "plugin-web/marketplace", "install"]],
+  "patches": ["core/data/ui/marketplace.patch"],
+  "ui": {
+    "dir": "plugin-web/marketplace",
+    "plugin": "marketplace",
+    "dist": "dist",
+    "build": [["npm", "run", "build"]]
+  }
+}
