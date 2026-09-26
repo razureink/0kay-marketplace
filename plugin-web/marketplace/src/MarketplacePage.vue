@@ -180,7 +180,7 @@ async function waitForOp(onDone: () => void) {
       setTimeout(() => location.reload(), 1200)
       return
     }
-    if (state.status === 'failed') throw new Error(state.error || '操作失败')
+    if (state.status === 'failed' || state.status === 'error') throw new Error(state.error || '操作失败')
   }
   throw new Error('操作超时')
 }
@@ -221,10 +221,18 @@ function installPlugin(item: MarketPlugin) {
   })
 }
 
-function uninstallPlugin(item: MarketPlugin) {
+async function confirmUninstall(pkg: string): Promise<boolean> {
+  const ui = (window as any).__0KAY_UI__
+  if (ui && typeof ui.confirm === 'function') {
+    return await ui.confirm({ title: '卸载插件', message: `确定卸载 ${pkg}？`, confirmLabel: '卸载', danger: true })
+  }
+  return window.confirm(`确定卸载 ${pkg}？`)
+}
+
+async function uninstallPlugin(item: MarketPlugin) {
   if (installing.value || !item.installed) return
   const pkg = item.entryName || item.full_name
-  if (!window.confirm(`确定卸载 ${pkg}？`)) return
+  if (!(await confirmUninstall(pkg))) return
   notice.value = ''
   return sendOp('/api/plugins/uninstall', item, pkg, () => {
     item.installed = false
