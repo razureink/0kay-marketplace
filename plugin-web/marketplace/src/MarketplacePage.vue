@@ -255,7 +255,7 @@ onMounted(() => load(1))
 </template>
 
 <style scoped>
-.mp { --code-font: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, 'SFMono-Regular', Menlo, monospace; padding: clamp(20px, 2.6vw, 36px); max-width: 1100px; margin: 0 auto; }
+.mp { --code-font: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, 'SFMono-Regular', Menlo, monospace; box-sizing: border-box; flex: 1; min-height: 0; width: 100%; overflow-y: auto; overscroll-behavior: contain; padding: clamp(20px, 2.6vw, 36px) max(clamp(20px, 2.6vw, 36px), calc((100% - 1100px) / 2)); }
 .mp-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
 .mp-eyebrow { margin: 0 0 6px; font-size: 12px; font-weight: 800; letter-spacing: .18em; color: var(--md-primary); }
 .mp-hero h1 { margin: 0; font-size: clamp(26px, 3vw, 38px); font-weight: 850; letter-spacing: -.02em; }
